@@ -5,7 +5,7 @@
 
 class MyServo {
   public:
-    MyServo(int gpio_pin, float *pAngles, int *pPulses, int count, float angle_per_ms, float default_angle, float min_angle, float max_angle, int min_pulse, int max_pulse);
+    MyServo(int gpio_pin, float *pAngles, int *pPulses, int count, float angle_per_ms, float default_angle, float min_angle, float max_angle, int min_pulse = -1000000, int max_pulse = 1000000);
 
     //プロパティ
     int getMinPulse();

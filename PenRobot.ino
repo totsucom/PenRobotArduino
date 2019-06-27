@@ -10,6 +10,7 @@ https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
 #define ARRAY_LEN(ARR) (sizeof(ARR) / sizeof((ARR)[0]))
 
 #include "MyServo.h"
+#include "PointXY.h"
 
 MyServo *leftServo;
 
@@ -31,6 +32,11 @@ void setup() {
     0.0F, 180.0F, //min, max angle
     500, 2400     //min, max pulse
   );   
+
+  PointXY a(100,100);
+  PointXY b(101,101);
+  a = b;
+  PointXY c = a + b;
 }
 
 void loop() {

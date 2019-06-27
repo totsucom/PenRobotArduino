@@ -22,7 +22,7 @@ MyServo::MyServo(int gpio_pin,
   float *pAngles, int *pPulses, int count,
   float angle_per_ms,
   float default_angle, float min_angle, float max_angle,
-  int min_pulse = -1000000, int max_pulse = 1000000)
+  int min_pulse, int max_pulse)
 {
   if (count < 2) {
 #ifdef DEBUG
