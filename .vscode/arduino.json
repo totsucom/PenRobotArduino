@@ -1,0 +1,7 @@
+{
+    "board": "adafruit:samd:adafruit_trinket_m0",
+    "configuration": "usbstack=arduino,debug=off",
+    "sketch": "PenRobot.ino",
+    "output": "../ArduinoOutput",
+    "port": "COM5"
+}
