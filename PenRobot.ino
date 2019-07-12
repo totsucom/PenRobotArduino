@@ -13,6 +13,7 @@ https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
 #include "MyServo.h"
 #include "PointXY.h"
 #include "Motion.h"
+#include "CommandBuffer.h"
 
 //↓↓Trinket-M0にあるDotStarLED(RGBカラーLED)を操作する。ステータス表示に使う
 #include "Adafruit_DotStar.h"
@@ -30,7 +31,6 @@ Adafruit_DotStar strip = Adafruit_DotStar(1, DATAPIN, CLOCKPIN, DOTSTAR_BGR);
 float current_x, current_y;     //現在のペンの位置
 bool current_position = false;  //current_x,yが有効か？
 bool pen_status = false;        //ペンの状態 trueで下がっている
-bool json_mode = false;         //情報表示をjson形式で表示するか？
 
 typedef enum {
     IDLING,
@@ -105,6 +105,8 @@ long off_delay;             //この時刻(millis)まで最低限LEDをON
 //情報表示管理
 bool show_information = false;//表示したい
 long show_delay;            //show_delayまで何もなければ表示
+
+long aligin_delay;          //IDLE一定時間後に原点復帰
 
 
 /**
@@ -357,15 +359,12 @@ bool DoIt()
       Serial.println("no more position, position calculated.");
 #endif
   
-      //原点でなかったらアイドリング表示にする
-      if (status != ORIGIN) {
+      //原点でなかったらアイドリング表示にする  BUSY<=>IDLEが連続してしまうため、メインループに移行
+      /*if (status != ORIGIN) {
         setStatus(IDLING);
-        //showStatus();
         show_information = true;
-        show_delay = millis() + 1000UL;
-      } else {
-        Serial.print("align");
-      }
+        show_delay = millis() + 500UL;
+      }*/
   
       //座標を再計算
       calcCurrentPosition();
@@ -472,10 +471,13 @@ void setStatus(STATUS new_status) {
     status = new_status;
     if (status == ORIGIN) {
       strip.setPixelColor(0, COLOR_ORIGIN);
+      Serial.println("{\"status\":\"ORIGN\"}");
     } else if (status == MOVING) {
       strip.setPixelColor(0, COLOR_MOVING);
+      Serial.println("{\"status\":\"BUSY\"}");
     } else {
       strip.setPixelColor(0, COLOR_IDLING);
+      Serial.println("{\"status\":\"IDLE\"}");
     }
     strip.show();
   }
@@ -496,117 +498,175 @@ void setup() {
   calcCurrentPosition();
 }
 
-/**
- * シリアルポートのコマンド一覧
- * <n> 整数(int)
- * <f> 実数(float)
- * 
- * 受信コマンド
- * x<f>　　　ペンをX方向に相対移動する 単位[mm]  例 x-1.5
- * y<f>　　　ペンをY方向に相対移動する 単位[mm]
- * l<f>　　　左サーボを相対回転する　　単位[度]
- * r<f>　　　右サーボを相対回転する　　単位[度]
- * u<f>　　　上下サーボを相対回転する　単位[度]
- * mn　　　　ペンの位置を近距離側へ移動(snコマンド用)
- * sn　　　　上下サーボ現在の角度を近距離側のペンの書く高さに設定する
- * sn<f>　　 上下サーボの近距離側のペンの書く高さを絶対角度で設定する　単位[度]
- * mf　　　　ペンの位置を遠距離側へ移動(sfコマンド用)
- * sf　　　　上下サーボ現在の角度を遠距離側のペンの書く高さに設定する
- * sf<f>　　 上下サーボの遠距離側のペンの書く高さを絶対角度で設定する　単位[度]
- * up　　　　ペンを上げる
- * dn　　　　ペンを下げる（書くポジション）
- * M<f>,<f>  ペンを上げた状態で絶対座標に移動する　　　　単位[mm]　例 m-20,50.5
- * L<f>,<f>  ペンを下げた状態で絶対座標に移動する（書く）
- * D<f>,<f>  何もしない（ダミー）
- * N<n>　　　合計n個のM,LまたはDコマンドのバッファ準備要求 nの有効範囲は1-100
- * g　　　　　ペンを上げて原点位置に戻る
- * i　　　　　角度や座標の情報を表示
- * j　　　　　情報表示形式をjsonにする
- * 
- * 送信コマンド
- * start　　nコマンド後、n個のmまたはlコマンドを受信したのち、startを発して描画を開始する
- * end　　　start後、すべてのmまたはlコマンドを処理したらendを返す
- * align　　原点に戻ったときに出力
- */
+//受信コマンド
+enum {
+ cmd_move_x = 128,  // <f>　　　ペンをX方向に相対移動する 単位[mm]  例 x-1.5
+ cmd_move_y,        // <f>　　　ペンをY方向に相対移動する 単位[mm]
+ cmd_angle_l,       // <f>　　　左サーボを相対回転する　　単位[度]
+ cmd_angle_r,       // <f>　　　右サーボを相対回転する　　単位[度]
+ cmd_angle_u,       // <f>　　　上下サーボを相対回転する　単位[度]
+ cmd_move_to_near,  //  　　　　ペンの位置を近距離側へ移動(snコマンド用)
+ cmd_set_near_angle,// <f>　　 上下サーボの近距離側のペンの書く高さを絶対角度で設定する　単位[度]
+ cmd_move_to_far,   // 　　　　 ペンの位置を遠距離側へ移動(sfコマンド用)
+ cmd_set_far_angle, // <f>　　 上下サーボの遠距離側のペンの書く高さを絶対角度で設定する　単位[度]
+ cmd_pen_up,        // 　　　　 ペンを上げる
+ cmd_pen_down,      // 　　　　 ペンを下げる（書くポジション）
+ cmd_move_to,       // <f><f>  ペンを上げた状態で絶対座標に移動する　　　　単位[mm]　例 m-20,50.5
+ cmd_line_to,       // <f><f>  ペンを下げた状態で絶対座標に移動する（書く）
+ cmd_align,         // 　　　　　ペンを上げて原点位置に戻る
+ cmd_info,          // 　　　　　角度や座標の情報を表示
+ cmd_last
+};
 
-//座標列を読み込んで処理するためのバッファ
-char  buf_c[100]; // 'M' または 'L'
-float buf_x[100];
-float buf_y[100];
-int buf_count = 0;
-int buf_index = 0;
-bool processing = false; //処理中はtrue
+//受信コマンド別必要なバイト数
+//dataSize[command - 128]
+byte dataSize[] = {
+ 5,  // <f>　　　ペンをX方向に相対移動する 単位[mm]  例 x-1.5
+ 5,  // <f>　　　ペンをY方向に相対移動する 単位[mm]
+ 5,  // <f>　　　左サーボを相対回転する　　単位[度]
+ 5,  // <f>　　　右サーボを相対回転する　　単位[度]
+ 5,  // <f>　　　上下サーボを相対回転する　単位[度]
+ 1,  // 　　　　 ペンの位置を近距離側へ移動(snコマンド用)
+ 5,  // <f>　　 上下サーボの近距離側のペンの書く高さを絶対角度で設定する　単位[度]
+ 1,  // 　　　　 ペンの位置を遠距離側へ移動(sfコマンド用)
+ 5,  // <f>　　 上下サーボの遠距離側のペンの書く高さを絶対角度で設定する　単位[度]
+ 1,  // 　　　　 ペンを上げる
+ 1,  // 　　　　 ペンを下げる（書くポジション）
+ 9,  // <f><f>  ペンを上げた状態で絶対座標に移動する　　　　単位[mm]　例 m-20,50.5
+ 9,  // <f><f>  ペンを下げた状態で絶対座標に移動する（書く）
+ 1,  // 　　　　　ペンを上げて原点位置に戻る
+ 1   // 　　　　　角度や座標の情報を表示
+};
+
+//受信コマンドを保持するバッファ
+CommandBuffer cb(1000);
+
+//完了しない、読みかけの受信コマンド
+#define MAX_COMMAND_LENGTH 9
+unsigned char command_reading_ontheway[MAX_COMMAND_LENGTH];
+int command_reading_ontheway_length = 0;
+int command_reading_complete_length = 0;
+unsigned long last_receive_millis;  //最後に受信したタイミング(長すぎると破棄)
+bool command_receivable = false;    //コマンドバイトは0xffの後にしかやってこない
 
 void loop() {
 
-  if (!DoIt()) {
-    if (processing) {
-
-      if (buf_index >= buf_count) {
-        //バッファにあった処理が終了
-
-        processing = false;
-        buf_count = 0;
-        buf_index = 0;
-
-        Serial.println("end");
-
-      } else {
-        if (buf_c[buf_index] != 'D') { //ダミーはスキップ
-          //次のバッファにある指示を実行
-  
-          //ペンの上下動
-          if (buf_index == 0 || (buf_c[buf_index - 1] != buf_c[buf_index])) {
-            pen_status = (buf_c[buf_index] == 'L');
-            
-            if (calcCurrentPosition()) {
-              setError(false);
-              updownServo.setAngle(calcUpdownAngle(current_y));
-            } else {
-              setError(true);
-            }        
-          }
-  
-          //移動指示
-          MoveTo(buf_x[buf_index], buf_y[buf_index]);
-        }
-        buf_index++;
+  //コマンド受信処理
+  if (Serial.available()) {
+    if (millis() > last_receive_millis + 20) {
+      if (command_reading_ontheway_length > 0) {
+        //古いデータは破棄。バッファ満タン時はcommand_reading_onthewayが空のはずなので、正常時に破棄されない
+        command_reading_ontheway_length = 0;
+        Serial.print("data disposed");
       }
     }
-    else if (Serial.available()) {
-      String s = Serial.readStringUntil('\n');
+    while (Serial.available() && cb.getFreeSize() >= MAX_COMMAND_LENGTH) {
+      //1バイト読む
+      unsigned char incoming_byte = Serial.read();
+      last_receive_millis = millis();
 
-      if (s == "mn") {
+      if (command_receivable && command_reading_ontheway_length == 0 &&
+        incoming_byte >= 128 && incoming_byte < cmd_last) {
+
+        //コマンド確定
+        if (dataSize[incoming_byte - 128] == 1) {
+          //1文字コマンドを追加
+          cb.addCommand(incoming_byte);
+#ifdef DEBUG
+          Serial.println("New command added");
+#endif
+        } else {
+          //追加のパラメーター待ち
+          command_reading_ontheway[0] = incoming_byte;
+          command_reading_ontheway_length = 1;
+          command_reading_complete_length = dataSize[incoming_byte - 128];
+        }
+      } else if (command_reading_ontheway_length >= 1 &&
+        command_reading_ontheway_length < command_reading_complete_length) {
+        
+        //パラメーターを追加
+        command_reading_ontheway[command_reading_ontheway_length++] = incoming_byte;
+        if (command_reading_ontheway_length == command_reading_complete_length) {
+          //パラメーターが満たされたのでコマンドを追加
+          cb.addCommand(&command_reading_ontheway[0], command_reading_complete_length);
+          command_reading_ontheway_length = 0;
+#ifdef DEBUG
+          Serial.println("New command(param) added");
+#endif
+        }
+      } else if (incoming_byte != 0xff) {
+        //いずれにも合致しない場合は破棄
+        command_reading_ontheway_length = 0;
+        Serial.print("unknown command ");
+        Serial.println(incoming_byte);
+      }
+      command_receivable = (incoming_byte == 0xff);
+    }
+
+    if (cb.getFreeSize() < MAX_COMMAND_LENGTH) {
+      Serial.print("buffer full");
+    }
+  }
+
+  if (DoIt()) {
+    //DoItでサーボ制御した
+    aligin_delay = millis() + 3000UL;
+
+  } else if (cb.getCount() > 0) {
+    //新しいコマンドを処理
+
+    unsigned char cmd = cb.peekCommand();
+#ifdef DEBUG
+    Serial.print("Process command ");
+    Serial.println(cmd);
+#endif
+    
+    float f1, f2;
+    switch ((int)cmd) {
+      case cmd_move_x:   // <f>　　　ペンをX方向に相対移動する 単位[mm]  例 x-1.5
+        cb.readCommand(&cmd, &f1);
+        MoveTo(current_x + f1, current_y);
+        break;
+      case cmd_move_y:   // <f>　　　ペンをY方向に相対移動する 単位[mm]
+        cb.readCommand(&cmd, &f1);
+        MoveTo(current_x, current_y + f1);
+        break;
+      case cmd_angle_l:  // <f>　　　左サーボを相対回転する　　単位[度]
+        cb.readCommand(&cmd, &f1);
+        TurnTo(leftServo.getCurrentAngle() + f1, rightServo.getCurrentAngle());
+        break;
+      case cmd_angle_r:  // <f>　　　右サーボを相対回転する　　単位[度]
+        cb.readCommand(&cmd, &f1);
+        TurnTo(leftServo.getCurrentAngle(), rightServo.getCurrentAngle() + f1);
+        break;
+      case cmd_angle_u:  // <f>　　　上下サーボを相対回転する　単位[度]
+        cb.readCommand(&cmd, &f1);
+        updownServo.setAngle(updownServo.getCurrentAngle() + f1);
+        break;
+      case cmd_move_to_near:   //  　　　　ペンの位置を近距離側へ移動(snコマンド用)
+        cb.readCommand(&cmd);
         MoveTo(0.0F, 35.0F);
-      }
-      else if (s == "mf") {
+        break;
+      case cmd_set_near_angle: // <f>　　 上下サーボの近距離側のペンの書く高さを絶対角度で設定する　単位[度]
+        cb.readCommand(&cmd, &f1);
+        if (f1 > 0.0F) {
+          updownWriteAngleAtNear = f1;
+          updownOffAngleAtNear = f1 + 10.0F;
+        }
+        break;
+      case cmd_move_to_far:    // 　　　　 ペンの位置を遠距離側へ移動(sfコマンド用)
+        cb.readCommand(&cmd);
         MoveTo(0.0F, 110.0F);
-      }
-      else if (s == "sn") {
-        updownWriteAngleAtNear = updownServo.getCurrentAngle();
-        updownOffAngleAtNear = updownWriteAngleAtNear + 5.0F;
-        pen_status = true;
-      }
-      else if (s == "sf") {
-        updownWriteAngleAtFar = updownServo.getCurrentAngle();
-        updownOffAngleAtFar = updownWriteAngleAtFar + 3.0F;
-        pen_status = true;
-      }
-      else if (s.length() > 2 && s[0] == 's' && s[1] == 'n') {
-        float f = atof(s.c_str() + 2);
-        if (f > 0.0F) {
-          updownWriteAngleAtNear = f;
-          updownOffAngleAtNear = f + 10.0F;
+        break;
+      case cmd_set_far_angle:  // <f>　　 上下サーボの遠距離側のペンの書く高さを絶対角度で設定する　単位[度]
+        cb.readCommand(&cmd, &f1);
+        if (f1 > 0.0F) {
+          updownWriteAngleAtFar = f1;
+          updownOffAngleAtFar = f1 + 6.0F;
         }
-      }
-      else if (s.length() > 2 && s[0] == 's' && s[1] == 'f') {
-        float f = atof(s.c_str() + 2);
-        if (f > 0.0F) {
-          updownWriteAngleAtFar = f;
-          updownOffAngleAtFar = f + 6.0F;
-        }
-      }
-      else if (s == "up") {
+        break;
+      case cmd_pen_up:         // 　　　　 ペンを上げる
+        cb.readCommand(&cmd);
         if (calcCurrentPosition()) {
           pen_status = false;
           updownServo.setAngle(calcUpdownAngle(current_y));
@@ -614,8 +674,9 @@ void loop() {
         } else {
           setError(true);
         }
-      }
-      else if (s == "dn") {
+        break;
+      case cmd_pen_down:       // 　　　　 ペンを下げる（書くポジション）
+        cb.readCommand(&cmd);
         if (calcCurrentPosition()) {
           pen_status = true;
           updownServo.setAngle(calcUpdownAngle(current_y));
@@ -623,131 +684,90 @@ void loop() {
         } else {
           setError(true);
         }
-      }
-      else if (s[0] == 'M' || s[0] == 'L' || s[0] == 'D') {
-        int i = s.indexOf(',');
-        if (i > 1) {
-          float x = atof(s.c_str() + 1);
-          float y = atof(s.c_str() + i + 1);
-          if (buf_index < buf_count) {
-            //バッファにを準備していた場合
-
-            buf_c[buf_index] = s[0];
-            buf_x[buf_index] = x;
-            buf_y[buf_index] = y;
-
-            if (++buf_index == buf_count) {
-              //バッファがいっぱいになったので処理を開始
-
-              Serial.println("start");
-              buf_index = 0;
-              processing = true;
-            }
-          } else if (buf_count == 0 && s[0] != 'D') {
-              //単発処理の場合
-
-            if (calcCurrentPosition()) {
-              setError(false);
-
-              //ペンの上げ下げ
-              pen_status = (s[0] == 'L');
-              updownServo.setAngle(calcUpdownAngle(current_y));
-
-              //移動指示
-              MoveTo(x, y);
-            } else {
-              setError(true);
-            }
-          }
+        break;
+      case cmd_move_to:       // <f><f>  ペンを上げた状態で絶対座標に移動する　　　　単位[mm]　例 m-20,50.5
+        cb.readCommand(&cmd, &f1, &f2);
+        if (pen_status) {
+          //ペンを上げる
+          if (calcCurrentPosition()) {
+            setError(false);
+            pen_status = false;
+            updownServo.setAngle(calcUpdownAngle(current_y));
+          } else {
+            setError(true);
+          }        
         }
-      } else if (s[0] == 'N') {
-        int n = atoi(s.c_str() + 1);
-        if (n > 0 && n <= 100) {
-          buf_count = n;
-          buf_index = 0;
-          processing = false;
+        //移動指示
+        MoveTo(f1, f2);
+        break;
+      case cmd_line_to:       // <f><f>  ペンを下げた状態で絶対座標に移動する（書く）
+        cb.readCommand(&cmd, &f1, &f2);
+        if (!pen_status) {
+          //ペンを下げる
+          if (calcCurrentPosition()) {
+            setError(false);
+            pen_status = true;
+            updownServo.setAngle(calcUpdownAngle(current_y));
+          } else {
+            setError(true);
+          }        
         }
-      } else if (s[0] == 'x') {
-        float f = atof(s.c_str() + 1);
-        MoveTo(current_x + f, current_y);
-      }
-      else if (s[0] == 'y') {
-        float f = atof(s.c_str() + 1);
-        MoveTo(current_x, current_y + f);
-      }
-      else if (s[0] == 'l') {
-        float f = atof(s.c_str() + 1);
-        TurnTo(leftServo.getCurrentAngle() + f, rightServo.getCurrentAngle());
-      }
-      else if (s[0] == 'r') {
-        float f = atof(s.c_str() + 1);
-        TurnTo(leftServo.getCurrentAngle(), rightServo.getCurrentAngle() + f);
-      }
-      else if (s[0] == 'u') {
-        float f = atof(s.c_str() + 1);
-        updownServo.setAngle(updownServo.getCurrentAngle() + f);
-      }
-      else if (s == "g") {
-        if (calcCurrentPosition()) {
-          pen_status = false;
-          updownServo.setAngle(calcUpdownAngle(current_y));
-          setError(false);
-        } else {
-          setError(true);
+        //移動指示
+        MoveTo(f1, f2);
+        break;
+      case cmd_align:         // 　　　　　ペンを上げて原点位置に戻る
+        cb.readCommand(&cmd);
+        if (pen_status) {
+          //ペンを上げる
+          if (calcCurrentPosition()) {
+            setError(false);
+            pen_status = false;
+            updownServo.setAngle(calcUpdownAngle(current_y));
+          } else {
+            setError(true);
+          }        
         }
+        //移動指示
         TurnTo(leftDefaultAngle, rightDefaultAngle);
-      }
-      else if (s == "i") {
+        break;
+      case cmd_info:           // 　　　　　角度や座標の情報を表示
+        cb.readCommand(&cmd);
         showStatus();
-      }
-      else if (s == "j") {
-        json_mode = true;
-      }
-    } else {
-      if (show_information && millis() >= show_delay) {
-        showStatus();
-      }
+        break;
     }
-  }
 
+  } else {
+    //何もすることがなくなった
+
+    if (status == MOVING) { //ALIGINの場合はDoIt()内で事前に処理済
+      setStatus(IDLING);
+      show_information = true;
+      show_delay = millis() + 500UL;
+    }
+
+    //自動原点復帰　ブラウザ側の制御が面倒なのでやめ
+    //if (status != ORIGIN && millis() > aligin_delay) {
+    //  cb.addCommand(cmd_align);
+    //}
+  }
+  
   updateError();
-  //delay(1000);
 }
 
 void showStatus() {
-  if (!json_mode) {
-    Serial.print("Angles L:");
-    Serial.print(leftServo.getCurrentAngle());  
-    Serial.print("  R:");
-    Serial.print(rightServo.getCurrentAngle());  
-    Serial.print("  U:");
-    Serial.println(updownServo.getCurrentAngle());  
-  
-    if (!current_position) {
-      Serial.println("<Posiotion not calculated>");
-      setError(true);
-    } else {    
-      setError(false);
-      Serial.print("Position (");
-      Serial.print(current_x);
-      Serial.print(",");
-      Serial.print(current_y);
-      Serial.println(pen_status ? ") WRITE" : ") OFF");
-    }
-  } else {
-    Serial.print("{\"l\":");
-    Serial.print(leftServo.getCurrentAngle());  
-    Serial.print(",\"r\":");
-    Serial.print(rightServo.getCurrentAngle());  
-    Serial.print(",\"u\":");
-    Serial.print(updownServo.getCurrentAngle());  
-    Serial.print(",\"x\":");
-    Serial.print(current_x);
-    Serial.print(",\"y\":");
-    Serial.print(current_y);
-    Serial.print(",\"pen\":");
-    Serial.print(pen_status ? "\"1\"" : "\"0\"");
-    Serial.println("}");
-  }
+  Serial.print("{\"l\":");
+  Serial.print(leftServo.getCurrentAngle());  
+  Serial.print(",\"r\":");
+  Serial.print(rightServo.getCurrentAngle());  
+  Serial.print(",\"u\":");
+  Serial.print(updownServo.getCurrentAngle());  
+  Serial.print(",\"x\":");
+  Serial.print(current_x);
+  Serial.print(",\"y\":");
+  Serial.print(current_y);
+  if (pen_status)
+    Serial.println(",\"pen\":1}");
+  else
+    Serial.println(",\"pen\":0}");
   show_information = false;
 }
